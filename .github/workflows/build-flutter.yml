@@ -17,16 +17,39 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
+          cache: 'gradle'
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.38.0'
+          flutter-version: '3.24.5'
           channel: 'stable'
+          cache: true
+
+      - name: Cache pub packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-flutter-3.24.5
+          restore-keys: |
+            pub-${{ runner.os }}-flutter-
+
+      - name: Cache Gradle wrapper & caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
       - name: Prepare Project
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -58,13 +81,14 @@ jobs:
           PROJECT_ROOT=$(dirname "$PUBSPEC")
           echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
           echo "Detected Flutter project root: $PROJECT_ROOT"
+
       - name: Build APK
         run: |
           set -e
           cd "$PROJECT_ROOT"
-          flutter clean
           flutter pub get
-          flutter build apk --release
+          flutter build apk --release --no-tree-shake-icons
+
       - name: Locate APK
         run: |
           set -e
@@ -76,8 +100,10 @@ jobs:
           fi
           echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
           echo "Found APK at: $APK_PATH"
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ github.event.inputs.jobId }}
           path: ${{ env.APK_PATH }}
+          compression-level: 1
