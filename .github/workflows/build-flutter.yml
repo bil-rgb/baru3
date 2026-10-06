@@ -1,5 +1,8 @@
 name: Build Flutter APK (Fallback Worker)
 
+
+run-name: Build ${{ inputs.jobId }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -16,6 +19,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Batas keras supaya build yang hang tidak jalan berjam-jam (default GitHub: 360 menit).
+    timeout-minutes: 55
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -31,6 +36,16 @@ jobs:
         with:
           flutter-version: '3.47.6'
           channel: 'stable'
+          cache: true
+
+      - name: Tune Gradle
+        run: |
+          mkdir -p "$HOME/.gradle"
+          cat >> "$HOME/.gradle/gradle.properties" <<'PROPS'
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g
+          org.gradle.daemon=false
+          org.gradle.parallel=true
+          PROPS
 
       - name: Prepare Project
         env:
@@ -39,6 +54,25 @@ jobs:
         run: |
           set -e
           printf '%s' "$PAYLOAD" > payload.json
+
+          if ! jq -e 'type == "object"' payload.json >/dev/null 2>&1; then
+            echo "::error::Payload harus berupa JSON object yang valid."
+            exit 1
+          fi
+
+          MODE=$(jq -r '.mode // "zip"' payload.json)
+          if [ "$MODE" != "zip" ]; then
+            echo "::error::Workflow ini hanya untuk mode 'zip' (build project Flutter). Mode '$MODE' (mis. Web2APK) butuh workflow lain."
+            exit 1
+          fi
+
+          BUILD_TYPE=$(jq -r '.buildType // "release"' payload.json)
+          case "$BUILD_TYPE" in
+            release|debug) ;;
+            *) BUILD_TYPE=release ;;
+          esac
+          echo "BUILD_TYPE=$BUILD_TYPE" >> "$GITHUB_ENV"
+          echo "Build type: $BUILD_TYPE"
 
           ASSET_URL=$(jq -r '.zipAssetUrl // .url // empty' payload.json)
           if [ -z "$ASSET_URL" ]; then
@@ -73,20 +107,30 @@ jobs:
         run: |
           set -e
           cd "$PROJECT_ROOT"
+
+          echo "::group::flutter pub get"
           flutter pub get
+          echo "::endgroup::"
 
           if grep -q "build_runner" pubspec.yaml; then
+            echo "::group::build_runner"
             dart run build_runner build --delete-conflicting-outputs
+            echo "::endgroup::"
           fi
 
-          flutter build apk --release
+          echo "Mulai build $BUILD_TYPE pada $(date -u +%H:%M:%S) UTC"
+          flutter build apk --"$BUILD_TYPE"
+          echo "Selesai build pada $(date -u +%H:%M:%S) UTC"
 
       - name: Locate APK
         run: |
           set -e
-          APK_PATH=$(find "$PROJECT_ROOT" -type f -name "app-release.apk" | head -n 1)
+          APK_PATH=$(find "$PROJECT_ROOT/build/app/outputs" -type f -name "app-${BUILD_TYPE}.apk" 2>/dev/null | head -n 1)
           if [ -z "$APK_PATH" ]; then
-            echo "::error::app-release.apk tidak ditemukan setelah build."
+            APK_PATH=$(find "$PROJECT_ROOT/build" -type f -name "*.apk" 2>/dev/null | head -n 1)
+          fi
+          if [ -z "$APK_PATH" ]; then
+            echo "::error::File APK tidak ditemukan setelah build."
             find "$PROJECT_ROOT/build" -maxdepth 5 2>/dev/null || true
             exit 1
           fi
@@ -98,3 +142,7 @@ jobs:
         with:
           name: apk-${{ github.event.inputs.jobId }}
           path: ${{ env.APK_PATH }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          
